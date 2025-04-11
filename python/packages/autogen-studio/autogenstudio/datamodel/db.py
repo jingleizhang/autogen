@@ -2,234 +2,82 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Union, Tuple, Type
-from sqlalchemy import ForeignKey, Integer, UniqueConstraint
-from sqlmodel import JSON, Column,  DateTime, Field, SQLModel, func, Relationship,   SQLModel
-from uuid import UUID, uuid4
+from typing import Any, Dict, List, Optional, Union
 
-from .types import ToolConfig, ModelConfig, AgentConfig, TeamConfig, MessageConfig, MessageMeta
+from autogen_core import ComponentModel
+from pydantic import ConfigDict, SecretStr, field_validator
+from sqlalchemy import ForeignKey, Integer
+from sqlmodel import JSON, Column, DateTime, Field, SQLModel, func
 
-# added for python3.11 and sqlmodel 0.0.22 incompatibility
-if hasattr(SQLModel, "model_config"):
-    SQLModel.model_config["protected_namespaces"] = ()
-elif hasattr(SQLModel, "Config"):
-    class CustomSQLModel(SQLModel):
-        class Config:
-            protected_namespaces = ()
-
-    SQLModel = CustomSQLModel
-else:
-    print("Warning: Unable to set protected_namespaces.")
-
-# pylint: disable=protected-access
+from .eval import EvalJudgeCriteria, EvalRunResult, EvalRunStatus, EvalScore, EvalTask
+from .types import (
+    GalleryComponents,
+    GalleryConfig,
+    GalleryMetadata,
+    MessageConfig,
+    MessageMeta,
+    SettingsConfig,
+    TeamResult,
+)
 
 
-class ComponentTypes(Enum):
-    TEAM = "team"
-    AGENT = "agent"
-    MODEL = "model"
-    TOOL = "tool"
+class BaseDBModel(SQLModel, table=False):
+    """
+    Base model with common fields for all database tables.
+    Not a table itself - meant to be inherited by concrete model classes.
+    """
 
-    @property
-    def model_class(self) -> Type[SQLModel]:
-        return {
-            ComponentTypes.TEAM: Team,
-            ComponentTypes.AGENT: Agent,
-            ComponentTypes.MODEL: Model,
-            ComponentTypes.TOOL: Tool
-        }[self]
+    __abstract__ = True
 
+    # Common fields present in all database tables
+    id: Optional[int] = Field(default=None, primary_key=True)
 
-class LinkTypes(Enum):
-    AGENT_MODEL = "agent_model"
-    AGENT_TOOL = "agent_tool"
-    TEAM_AGENT = "team_agent"
-
-    @property
-    # type: ignore
-    def link_config(self) -> Tuple[Type[SQLModel], Type[SQLModel], Type[SQLModel]]:
-        return {
-            LinkTypes.AGENT_MODEL: (Agent, Model, AgentModelLink),
-            LinkTypes.AGENT_TOOL: (Agent, Tool, AgentToolLink),
-            LinkTypes.TEAM_AGENT: (Team, Agent, TeamAgentLink)
-        }[self]
-
-    @property
-    def primary_class(self) -> Type[SQLModel]:  # type: ignore
-        return self.link_config[0]
-
-    @property
-    def secondary_class(self) -> Type[SQLModel]:  # type: ignore
-        return self.link_config[1]
-
-    @property
-    def link_table(self) -> Type[SQLModel]:  # type: ignore
-        return self.link_config[2]
-
-
-# link models
-class AgentToolLink(SQLModel, table=True):
-    __table_args__ = (
-        UniqueConstraint('agent_id', 'sequence',
-                         name='unique_agent_tool_sequence'),
-        {'sqlite_autoincrement': True}
+    created_at: datetime = Field(
+        default_factory=datetime.now,
+        sa_type=DateTime(timezone=True),  # type: ignore[assignment]
+        sa_column_kwargs={"server_default": func.now(), "nullable": True},
     )
-    agent_id: int = Field(default=None, primary_key=True,
-                          foreign_key="agent.id")
-    tool_id: int = Field(default=None, primary_key=True, foreign_key="tool.id")
-    sequence: Optional[int] = Field(default=0, primary_key=True)
 
-
-class AgentModelLink(SQLModel, table=True):
-    __table_args__ = (
-        UniqueConstraint('agent_id', 'sequence',
-                         name='unique_agent_tool_sequence'),
-        {'sqlite_autoincrement': True}
+    updated_at: datetime = Field(
+        default_factory=datetime.now,
+        sa_type=DateTime(timezone=True),  # type: ignore[assignment]
+        sa_column_kwargs={"onupdate": func.now(), "nullable": True},
     )
-    agent_id: int = Field(default=None, primary_key=True,
-                          foreign_key="agent.id")
-    model_id: int = Field(default=None, primary_key=True,
-                          foreign_key="model.id")
-    sequence: Optional[int] = Field(default=0, primary_key=True)
 
-
-class TeamAgentLink(SQLModel, table=True):
-    __table_args__ = (
-        UniqueConstraint('agent_id', 'sequence',
-                         name='unique_agent_tool_sequence'),
-        {'sqlite_autoincrement': True}
-    )
-    team_id: int = Field(default=None, primary_key=True, foreign_key="team.id")
-    agent_id: int = Field(default=None, primary_key=True,
-                          foreign_key="agent.id")
-    sequence: Optional[int] = Field(default=0, primary_key=True)
-
-# database models
-
-
-class Tool(SQLModel, table=True):
-    __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
     user_id: Optional[str] = None
     version: Optional[str] = "0.0.1"
-    config: Union[ToolConfig, dict] = Field(
-        default_factory=ToolConfig, sa_column=Column(JSON))
-    agents: List["Agent"] = Relationship(
-        back_populates="tools", link_model=AgentToolLink)
 
 
-class Model(SQLModel, table=True):
+class Team(BaseDBModel, table=True):
     __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
-    user_id: Optional[str] = None
-    version: Optional[str] = "0.0.1"
-    config: Union[ModelConfig, dict] = Field(
-        default_factory=ModelConfig, sa_column=Column(JSON))
-    agents: List["Agent"] = Relationship(
-        back_populates="models", link_model=AgentModelLink)
+    component: Union[ComponentModel, dict] = Field(sa_column=Column(JSON))
 
 
-class Team(SQLModel, table=True):
+class Message(BaseDBModel, table=True):
     __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
-    user_id: Optional[str] = None
-    version: Optional[str] = "0.0.1"
-    config: Union[TeamConfig, dict] = Field(
-        default_factory=TeamConfig, sa_column=Column(JSON))
-    agents: List["Agent"] = Relationship(
-        back_populates="teams", link_model=TeamAgentLink)
 
-
-class Agent(SQLModel, table=True):
-    __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
-    user_id: Optional[str] = None
-    version: Optional[str] = "0.0.1"
-    config: Union[AgentConfig, dict] = Field(
-        default_factory=AgentConfig, sa_column=Column(JSON))
-    tools: List[Tool] = Relationship(
-        back_populates="agents", link_model=AgentToolLink)
-    models: List[Model] = Relationship(
-        back_populates="agents", link_model=AgentModelLink)
-    teams: List[Team] = Relationship(
-        back_populates="agents", link_model=TeamAgentLink)
-
-
-class Message(SQLModel, table=True):
-    __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
-    user_id: Optional[str] = None
-    version: Optional[str] = "0.0.1"
     config: Union[MessageConfig, dict] = Field(
-        default_factory=MessageConfig, sa_column=Column(JSON))
+        default_factory=lambda: MessageConfig(source="", content=""), sa_column=Column(JSON)
+    )
     session_id: Optional[int] = Field(
-        default=None, sa_column=Column(Integer, ForeignKey("session.id", ondelete="CASCADE"))
+        default=None, sa_column=Column(Integer, ForeignKey("session.id", ondelete="NO ACTION"))
     )
-    run_id: Optional[UUID] = Field(
-        default=None, foreign_key="run.id"
-    )
+    run_id: Optional[int] = Field(default=None, sa_column=Column(Integer, ForeignKey("run.id", ondelete="CASCADE")))
 
-    message_meta: Optional[Union[MessageMeta, dict]] = Field(
-        default={}, sa_column=Column(JSON))
+    message_meta: Optional[Union[MessageMeta, dict]] = Field(default={}, sa_column=Column(JSON))
 
 
-class Session(SQLModel, table=True):
+class Session(BaseDBModel, table=True):
     __table_args__ = {"sqlite_autoincrement": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-    )  # pylint: disable=not-callable
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
-    )  # pylint: disable=not-callable
-    user_id: Optional[str] = None
-    version: Optional[str] = "0.0.1"
-    team_id: Optional[int] = Field(
-        default=None, sa_column=Column(Integer, ForeignKey("team.id", ondelete="CASCADE"))
-    )
+    team_id: Optional[int] = Field(default=None, sa_column=Column(Integer, ForeignKey("team.id", ondelete="CASCADE")))
     name: Optional[str] = None
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def parse_datetime(cls, value: Union[str, datetime]) -> datetime:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
 
 
 class RunStatus(str, Enum):
@@ -240,43 +88,111 @@ class RunStatus(str, Enum):
     STOPPED = "stopped"
 
 
-class Run(SQLModel, table=True):
+class Run(BaseDBModel, table=True):
     """Represents a single execution run within a session"""
+
     __table_args__ = {"sqlite_autoincrement": True}
 
-    # Primary key using UUID
-    id: UUID = Field(
-        default_factory=uuid4,
-        primary_key=True,
-        index=True
-    )
-
-    # Timestamps using the same pattern as other models
-    created_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now())
-    )
-    updated_at: datetime = Field(
-        default_factory=datetime.now,
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now())
-    )
-
-    # Foreign key to Session
     session_id: Optional[int] = Field(
-        default=None,
-        sa_column=Column(
-            Integer,
-            ForeignKey("session.id", ondelete="CASCADE"),
-            nullable=False
-        )
+        default=None, sa_column=Column(Integer, ForeignKey("session.id", ondelete="CASCADE"), nullable=False)
+    )
+    status: RunStatus = Field(default=RunStatus.CREATED)
+
+    # Store the original user task
+    task: Union[MessageConfig, dict] = Field(
+        default_factory=lambda: MessageConfig(source="", content=""), sa_column=Column(JSON)
     )
 
-    # Run status and metadata
-    status: RunStatus = Field(default=RunStatus.CREATED)
+    # Store TeamResult which contains TaskResult
+    team_result: Union[TeamResult, dict] = Field(default=None, sa_column=Column(JSON))
+
     error_message: Optional[str] = None
-
-    # Metadata storage following pattern from Message model
-    run_meta: dict = Field(default={}, sa_column=Column(JSON))
-
-    # Version tracking like other models
     version: Optional[str] = "0.0.1"
+    messages: Union[List[Message], List[dict]] = Field(default_factory=list, sa_column=Column(JSON))
+
+    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})  # type: ignore[call-arg]
+    user_id: Optional[str] = None
+
+
+class Gallery(BaseDBModel, table=True):
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    config: Union[GalleryConfig, dict] = Field(
+        default_factory=lambda: GalleryConfig(
+            id="",
+            name="",
+            metadata=GalleryMetadata(author="", version=""),
+            components=GalleryComponents(agents=[], models=[], tools=[], terminations=[], teams=[]),
+        ),
+        sa_column=Column(JSON),
+    )
+
+    model_config = ConfigDict(
+        json_encoders={
+            datetime: lambda v: v.isoformat(),
+            SecretStr: lambda v: v.get_secret_value(),  # Add this line
+        }
+    )  # type: ignore[call-arg]
+
+
+class Settings(BaseDBModel, table=True):
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    config: Union[SettingsConfig, dict] = Field(default_factory=SettingsConfig, sa_column=Column(JSON))
+
+
+# --- Evaluation system database models ---
+
+
+class EvalTaskDB(BaseDBModel, table=True):
+    """Database model for storing evaluation tasks."""
+
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    name: str = "Unnamed Task"
+    description: str = ""
+    config: Union[EvalTask, dict] = Field(sa_column=Column(JSON))
+
+
+class EvalCriteriaDB(BaseDBModel, table=True):
+    """Database model for storing evaluation criteria."""
+
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    name: str = "Unnamed Criteria"
+    description: str = ""
+    config: Union[EvalJudgeCriteria, dict] = Field(sa_column=Column(JSON))
+
+
+class EvalRunDB(BaseDBModel, table=True):
+    """Database model for tracking evaluation runs."""
+
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    name: str = "Unnamed Evaluation Run"
+    description: str = ""
+
+    # References to related components
+    task_id: Optional[int] = Field(
+        default=None, sa_column=Column(Integer, ForeignKey("evaltaskdb.id", ondelete="SET NULL"))
+    )
+
+    # Serialized configurations for runner and judge
+    runner_config: Union[ComponentModel, dict] = Field(sa_column=Column(JSON))
+    judge_config: Union[ComponentModel, dict] = Field(sa_column=Column(JSON))
+
+    # List of criteria IDs or embedded criteria configs
+    criteria_configs: List[Union[EvalJudgeCriteria, dict]] = Field(default_factory=list, sa_column=Column(JSON))
+
+    # Run status and timing information
+    status: EvalRunStatus = Field(default=EvalRunStatus.PENDING)
+    start_time: Optional[datetime] = Field(default=None)
+    end_time: Optional[datetime] = Field(default=None)
+
+    # Results (updated as they become available)
+    run_result: Union[EvalRunResult, dict] = Field(default=None, sa_column=Column(JSON))
+
+    score_result: Union[EvalScore, dict] = Field(default=None, sa_column=Column(JSON))
+
+    # Additional metadata
+    error_message: Optional[str] = None

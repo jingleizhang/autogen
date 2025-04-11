@@ -1,24 +1,22 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // HelloAIAgent.cs
 
-using Microsoft.AutoGen.Abstractions;
-using Microsoft.AutoGen.Agents;
+using Microsoft.AutoGen.Contracts;
+using Microsoft.AutoGen.Core;
 using Microsoft.Extensions.AI;
 
 namespace Hello;
-[TopicSubscription("HelloAgents")]
+[TopicSubscription("agents")]
 public class HelloAIAgent(
-    IAgentRuntime context,
-    [FromKeyedServices("EventTypes")] EventTypes typeRegistry,
+    [FromKeyedServices("AgentsMetadata")] AgentsMetadata typeRegistry,
     IHostApplicationLifetime hostApplicationLifetime,
     IChatClient client) : HelloAgent(
-        context,
         typeRegistry,
         hostApplicationLifetime),
         IHandle<NewMessageReceived>
 {
     // This Handle supercedes the one in the base class
-    public new async Task Handle(NewMessageReceived item)
+    public new async Task Handle(NewMessageReceived item, CancellationToken cancellationToken = default)
     {
         var prompt = "Please write a limerick greeting someone with the name " + item.Message;
         var response = await client.CompleteAsync(prompt);

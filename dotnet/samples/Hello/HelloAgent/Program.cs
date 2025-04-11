@@ -1,75 +1,82 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Program.cs
 
-using Microsoft.AutoGen.Abstractions;
 using Microsoft.AutoGen.Agents;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+using Microsoft.AutoGen.Contracts;
+using Microsoft.AutoGen.Core;
+using Microsoft.AutoGen.Core.Grpc;
+using Samples;
 
-// step 1: create in-memory agent runtime
-
-// step 2: register HelloAgent to that agent runtime
-
-// step 3: start the agent runtime
-
-// step 4: send a message to the agent
-
-// step 5: wait for the agent runtime to shutdown
-var app = await AgentsApp.PublishMessageAsync("HelloAgents", new NewMessageReceived
+string? hostAddress = null;
+bool in_host_address = false;
+bool sendHello = true;
+foreach (string arg in args)
 {
-    Message = "World"
-}, local: true);
-//var app = await AgentsApp.StartAsync();
-await app.WaitForShutdownAsync();
-
-namespace Hello
-{
-    [TopicSubscription("HelloAgents")]
-    public class HelloAgent(
-        IAgentRuntime context, IHostApplicationLifetime hostApplicationLifetime,
-        [FromKeyedServices("EventTypes")] EventTypes typeRegistry) : AgentBase(
-            context,
-            typeRegistry),
-            ISayHello,
-            IHandleConsole,
-            IHandle<NewMessageReceived>,
-            IHandle<ConversationClosed>,
-            IHandle<Shutdown>
+    switch (arg)
     {
-        public async Task Handle(NewMessageReceived item)
-        {
-            var response = await SayHello(item.Message).ConfigureAwait(false);
-            var evt = new Output { Message = response };
-            await PublishMessageAsync(evt).ConfigureAwait(false);
-            var goodbye = new ConversationClosed
+        case "--host":
+            in_host_address = true;
+            break;
+        case "--nosend":
+            sendHello = false;
+            break;
+        case "-h":
+        case "--help":
+            PrintHelp();
+            Environment.Exit(0);
+            break;
+        default:
+            if (in_host_address)
             {
-                UserId = this.AgentId.Key,
-                UserMessage = "Goodbye"
-            };
-            await PublishMessageAsync(goodbye).ConfigureAwait(false);
-        }
-        public async Task Handle(ConversationClosed item)
-        {
-            var goodbye = $"*********************  {item.UserId} said {item.UserMessage}  ************************";
-            var evt = new Output { Message = goodbye };
-            await PublishMessageAsync(evt).ConfigureAwait(true);
-            await PublishMessageAsync(new Shutdown()).ConfigureAwait(false);
-        }
-
-        public async Task Handle(Shutdown item)
-        {
-            Console.WriteLine("Shutting down...");
-            hostApplicationLifetime.StopApplication();
-        }
-
-        public async Task<string> SayHello(string ask)
-        {
-            var response = $"\n\n\n\n***************Hello {ask}**********************\n\n\n\n";
-            return response;
-        }
+                hostAddress = arg;
+            }
+            break;
     }
-    public interface ISayHello
-    {
-        public Task<string> SayHello(string ask);
-    }
+}
+
+hostAddress ??= Environment.GetEnvironmentVariable("AGENT_HOST");
+var appBuilder = new AgentsAppBuilder(); // Create app builder
+// if we are using distributed, we need the AGENT_HOST var defined and then we will use the grpc runtime
+
+bool usingGrpc = false;
+if (hostAddress is string agentHost)
+{
+    usingGrpc = true;
+    Console.WriteLine($"connecting to {agentHost}");
+    appBuilder.AddGrpcAgentWorker(agentHost)
+        .AddAgent<HelloAgent>("HelloAgent");
+}
+else
+{
+    // Set up app builder for in-process runtime, allow message delivery to self, and add the Hello agent
+    appBuilder.UseInProcessRuntime(deliverToSelf: true).AddAgent<HelloAgent>("HelloAgent");
+}
+var app = await appBuilder.BuildAsync(); // Build the app
+await app.StartAsync();
+// Create a custom message type from proto and define message
+
+if (sendHello)
+{
+    var message = new NewMessageReceived { Message = "Hello World!" };
+    await app.PublishMessageAsync(message, new TopicId("HelloTopic")).ConfigureAwait(false); // Publish custom message (handler has been set in HelloAgent)
+}
+else if (!usingGrpc)
+{
+    Console.Write("Warning: Using --nosend with the InProcessRuntime will hang. Terminating.");
+    Environment.Exit(-1);
+}
+
+await app.WaitForShutdownAsync().ConfigureAwait(false); // Wait for shutdown from agent
+
+static void PrintHelp()
+{
+    /*
+     HelloAgent [--host <hostAddress>] [--nosend]
+       --host Use gRPC gateway at <hostAddress>; this can also be set using the AGENT_HOST Environment Variable
+       --nosend Do not send the starting message. Note: This means HelloAgent will wait until some other agent will send
+                that message. This will not work when using the InProcessRuntime.
+     */
+    Console.WriteLine("HelloAgent [--host <hostAddress>] [--nosend]");
+    Console.WriteLine("  --host \tUse gRPC gateway at <hostAddress>; this can also be set using the AGENT_HOST Environment Variable");
+    Console.WriteLine("  --nosend \tDo not send the starting message. Note: This means HelloAgent will wait until some other agent will send");
 }

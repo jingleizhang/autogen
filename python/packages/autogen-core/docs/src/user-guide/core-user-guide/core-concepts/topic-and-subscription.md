@@ -3,7 +3,7 @@
 There are two ways for runtime to deliver messages,
 direct messaging or broadcast. Direct messaging is one to one: the sender
 must provide the recipient's agent ID. On the other hand,
-broadcast is one to many and the sender does not provide recpients'
+broadcast is one to many and the sender does not provide recipients'
 agent IDs.
 
 Many scenarios are suitable for broadcast.
@@ -12,6 +12,7 @@ will handle their messages, and a workflow can be composed of agents
 with no inter-dependencies.
 This section focuses on the core concepts in broadcast: topic and subscription.
 
+(topic_and_subscription_topic)=
 ## Topic
 
 A topic defines the scope of a broadcast message.

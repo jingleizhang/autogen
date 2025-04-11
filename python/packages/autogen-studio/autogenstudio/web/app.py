@@ -1,23 +1,21 @@
 # api/app.py
 import os
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
 # import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 from loguru import logger
 
-from .routes import sessions, runs, teams, agents, models, tools, ws
-from .deps import init_managers, cleanup_managers
-from .config import settings
-from .initialization import AppInitializer
 from ..version import VERSION
-
-# Configure logging
-# logger = logging.getLogger(__name__)
-# logging.basicConfig(level=logging.INFO)
-
+from .auth import authroutes
+from .auth.middleware import AuthMiddleware
+from .config import settings
+from .deps import cleanup_managers, init_auth_manager, init_managers, register_auth_dependencies
+from .initialization import AppInitializer
+from .routes import gallery, runs, sessions, settingsroute, teams, validation, ws
 
 # Initialize application
 app_file_path = os.path.dirname(os.path.abspath(__file__))
@@ -30,15 +28,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Lifecycle manager for the FastAPI application.
     Handles initialization and cleanup of application resources.
     """
-    # Startup
-    logger.info("Initializing application...")
+
     try:
         # Initialize managers (DB, Connection, Team)
         await init_managers(initializer.database_uri, initializer.config_dir, initializer.app_root)
-        logger.info("Managers initialized successfully")
+
+        await register_auth_dependencies(app, auth_manager)
 
         # Any other initialization code
-        logger.info("Application startup complete")
+        logger.info(
+            f"Application startup complete. Navigate to http://{os.environ.get('AUTOGENSTUDIO_HOST', '127.0.0.1')}:{os.environ.get('AUTOGENSTUDIO_PORT', '8081')}"
+        )
 
     except Exception as e:
         logger.error(f"Failed to initialize application: {str(e)}")
@@ -54,6 +54,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
 
+
+auth_manager = init_auth_manager(initializer.config_dir)
 # Create FastAPI application
 app = FastAPI(lifespan=lifespan, debug=True)
 
@@ -70,6 +72,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuthMiddleware, auth_manager=auth_manager)
 
 # Create API router with version and documentation
 api = FastAPI(
@@ -102,26 +105,6 @@ api.include_router(
     responses={404: {"description": "Not found"}},
 )
 
-api.include_router(
-    agents.router,
-    prefix="/agents",
-    tags=["agents"],
-    responses={404: {"description": "Not found"}},
-)
-
-api.include_router(
-    models.router,
-    prefix="/models",
-    tags=["models"],
-    responses={404: {"description": "Not found"}},
-)
-
-api.include_router(
-    tools.router,
-    prefix="/tools",
-    tags=["tools"],
-    responses={404: {"description": "Not found"}},
-)
 
 api.include_router(
     ws.router,
@@ -130,6 +113,33 @@ api.include_router(
     responses={404: {"description": "Not found"}},
 )
 
+api.include_router(
+    validation.router,
+    prefix="/validate",
+    tags=["validation"],
+    responses={404: {"description": "Not found"}},
+)
+
+api.include_router(
+    settingsroute.router,
+    prefix="/settings",
+    tags=["settings"],
+    responses={404: {"description": "Not found"}},
+)
+
+api.include_router(
+    gallery.router,
+    prefix="/gallery",
+    tags=["gallery"],
+    responses={404: {"description": "Not found"}},
+)
+# Include authentication routes
+api.include_router(
+    authroutes.router,
+    prefix="/auth",
+    tags=["auth"],
+    responses={404: {"description": "Not found"}},
+)
 
 # Version endpoint
 
@@ -143,6 +153,7 @@ async def get_version():
         "data": {"version": VERSION},
     }
 
+
 # Health check endpoint
 
 
@@ -153,6 +164,7 @@ async def health_check():
         "status": True,
         "message": "Service is healthy",
     }
+
 
 # Mount static file directories
 app.mount("/api", api)
@@ -172,7 +184,7 @@ async def internal_error_handler(request, exc):
     return {
         "status": False,
         "message": "Internal server error",
-        "detail": str(exc) if settings.API_DOCS else "Internal server error"
+        "detail": str(exc) if settings.API_DOCS else "Internal server error",
     }
 
 

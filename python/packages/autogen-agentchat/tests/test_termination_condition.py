@@ -1,16 +1,27 @@
 import asyncio
 
 import pytest
-from autogen_agentchat.messages import HandoffMessage, StopMessage, TextMessage
-from autogen_agentchat.task import (
+from autogen_agentchat.base import TerminatedException
+from autogen_agentchat.conditions import (
+    ExternalTermination,
+    FunctionCallTermination,
     HandoffTermination,
     MaxMessageTermination,
+    SourceMatchTermination,
     StopMessageTermination,
     TextMentionTermination,
+    TextMessageTermination,
     TimeoutTermination,
     TokenUsageTermination,
 )
-from autogen_core.components.models import RequestUsage
+from autogen_agentchat.messages import (
+    HandoffMessage,
+    StopMessage,
+    TextMessage,
+    ToolCallExecutionEvent,
+    UserInputRequestedEvent,
+)
+from autogen_core.models import FunctionExecutionResult, RequestUsage
 
 
 @pytest.mark.asyncio
@@ -60,6 +71,40 @@ async def test_stop_message_termination() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_message_termination() -> None:
+    termination = TextMessageTermination()
+    assert await termination([]) is None
+    await termination.reset()
+    assert await termination([StopMessage(content="Hello", source="user")]) is None
+    await termination.reset()
+    assert await termination([TextMessage(content="Hello", source="user")]) is not None
+    assert termination.terminated
+    await termination.reset()
+    assert (
+        await termination([StopMessage(content="Hello", source="user"), TextMessage(content="World", source="agent")])
+        is not None
+    )
+    assert termination.terminated
+    with pytest.raises(TerminatedException):
+        await termination([TextMessage(content="Hello", source="user")])
+
+    termination = TextMessageTermination(source="user")
+    assert await termination([]) is None
+    await termination.reset()
+    assert await termination([TextMessage(content="Hello", source="user")]) is not None
+    assert termination.terminated
+    await termination.reset()
+
+    termination = TextMessageTermination(source="agent")
+    assert await termination([]) is None
+    await termination.reset()
+    assert await termination([TextMessage(content="Hello", source="user")]) is None
+    await termination.reset()
+    assert await termination([TextMessage(content="Hello", source="agent")]) is not None
+    assert termination.terminated
+
+
+@pytest.mark.asyncio
 async def test_max_message_termination() -> None:
     termination = MaxMessageTermination(2)
     assert await termination([]) is None
@@ -68,6 +113,18 @@ async def test_max_message_termination() -> None:
     await termination.reset()
     assert (
         await termination([TextMessage(content="Hello", source="user"), TextMessage(content="World", source="agent")])
+        is not None
+    )
+
+    termination = MaxMessageTermination(2, include_agent_event=True)
+    assert await termination([]) is None
+    await termination.reset()
+    assert await termination([TextMessage(content="Hello", source="user")]) is None
+    await termination.reset()
+    assert (
+        await termination(
+            [TextMessage(content="Hello", source="user"), UserInputRequestedEvent(request_id="1", source="agent")]
+        )
         is not None
     )
 
@@ -83,6 +140,13 @@ async def test_mention_termination() -> None:
     await termination.reset()
     assert (
         await termination([TextMessage(content="Hello", source="user"), TextMessage(content="stop", source="user")])
+        is not None
+    )
+    termination = TextMentionTermination("stop", sources=["agent"])
+    assert await termination([TextMessage(content="stop", source="user")]) is None
+    await termination.reset()
+    assert (
+        await termination([TextMessage(content="stop", source="user"), TextMessage(content="stop", source="agent")])
         is not None
     )
 
@@ -226,3 +290,88 @@ async def test_timeout_termination() -> None:
     assert await termination([TextMessage(content="Hello", source="user")]) is None
     await asyncio.sleep(0.2)
     assert await termination([TextMessage(content="World", source="user")]) is not None
+
+
+@pytest.mark.asyncio
+async def test_external_termination() -> None:
+    termination = ExternalTermination()
+
+    assert await termination([]) is None
+    assert not termination.terminated
+
+    termination.set()
+    assert await termination([]) is not None
+    assert termination.terminated
+
+    await termination.reset()
+    assert await termination([]) is None
+
+
+@pytest.mark.asyncio
+async def test_source_match_termination() -> None:
+    termination = SourceMatchTermination(sources=["Assistant"])
+    assert await termination([]) is None
+
+    continue_messages = [TextMessage(content="Hello", source="agent"), TextMessage(content="Hello", source="user")]
+    assert await termination(continue_messages) is None
+
+    terminate_messages = [
+        TextMessage(content="Hello", source="agent"),
+        TextMessage(content="Hello", source="Assistant"),
+        TextMessage(content="Hello", source="user"),
+    ]
+    result = await termination(terminate_messages)
+    assert isinstance(result, StopMessage)
+    assert termination.terminated
+
+    with pytest.raises(TerminatedException):
+        await termination([])
+    await termination.reset()
+    assert not termination.terminated
+
+
+@pytest.mark.asyncio
+async def test_function_call_termination() -> None:
+    termination = FunctionCallTermination(function_name="test_function")
+    assert await termination([]) is None
+    await termination.reset()
+
+    assert await termination([TextMessage(content="Hello", source="user")]) is None
+    await termination.reset()
+
+    assert (
+        await termination(
+            [TextMessage(content="Hello", source="user"), ToolCallExecutionEvent(content=[], source="assistant")]
+        )
+        is None
+    )
+    await termination.reset()
+
+    assert (
+        await termination(
+            [
+                TextMessage(content="Hello", source="user"),
+                ToolCallExecutionEvent(
+                    content=[FunctionExecutionResult(content="", name="test_function", call_id="")], source="assistant"
+                ),
+            ]
+        )
+        is not None
+    )
+    assert termination.terminated
+    await termination.reset()
+
+    assert (
+        await termination(
+            [
+                TextMessage(content="Hello", source="user"),
+                ToolCallExecutionEvent(
+                    content=[FunctionExecutionResult(content="", name="another_function", call_id="")],
+                    source="assistant",
+                ),
+            ]
+        )
+        is None
+    )
+    assert not termination.terminated
+    await termination.reset()

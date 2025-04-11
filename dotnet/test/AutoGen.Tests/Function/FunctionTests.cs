@@ -16,6 +16,8 @@ using Microsoft.Extensions.AI;
 using Xunit;
 
 namespace AutoGen.Tests.Function;
+
+[Trait("Category", "UnitV1")]
 public class FunctionTests
 {
     private readonly JsonSerializerOptions _jsonSerializerOptions = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -58,7 +60,7 @@ public class FunctionTests
             GetWeatherAsyncStatic,
         ];
 
-        var functionContracts = availableDelegates.Select(function => (FunctionContract)AIFunctionFactory.Create(function).Metadata).ToList();
+        var functionContracts = availableDelegates.Select(function => (FunctionContract)AIFunctionFactory.Create(function)).ToList();
 
         // Verify the function contracts
         functionContracts.Should().HaveCount(4);

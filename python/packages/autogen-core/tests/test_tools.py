@@ -1,13 +1,14 @@
 import inspect
+from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, List
 
 import pytest
-from autogen_core.base import CancellationToken
-from autogen_core.components._function_utils import get_typed_signature
-from autogen_core.components.models._openai_client import convert_tools
-from autogen_core.components.tools import BaseTool, FunctionTool
-from autogen_core.components.tools._base import ToolSchema
-from pydantic import BaseModel, Field, model_serializer
+from autogen_core import CancellationToken
+from autogen_core._function_utils import get_typed_signature
+from autogen_core.tools import BaseTool, FunctionTool
+from autogen_core.tools._base import ToolSchema
+from pydantic import BaseModel, Field, ValidationError, model_serializer
 from pydantic_core import PydanticUndefined
 
 
@@ -93,6 +94,37 @@ def test_func_tool_schema_generation() -> None:
     assert len(schema["parameters"]["properties"]) == 3
 
 
+def test_func_tool_schema_generation_strict() -> None:
+    def my_function1(arg: str, other: Annotated[int, "int arg"], nonrequired: int = 5) -> MyResult:
+        return MyResult(result="test")
+
+    with pytest.raises(ValueError, match="Strict mode is enabled"):
+        tool = FunctionTool(my_function1, description="Function tool.", strict=True)
+        schema = tool.schema
+
+    def my_function2(arg: str, other: Annotated[int, "int arg"]) -> MyResult:
+        return MyResult(result="test")
+
+    tool = FunctionTool(my_function2, description="Function tool.", strict=True)
+    schema = tool.schema
+
+    assert schema["name"] == "my_function2"
+    assert "description" in schema
+    assert schema["description"] == "Function tool."
+    assert "parameters" in schema
+    assert schema["parameters"]["type"] == "object"
+    assert schema["parameters"]["properties"].keys() == {"arg", "other"}
+    assert schema["parameters"]["properties"]["arg"]["type"] == "string"
+    assert schema["parameters"]["properties"]["arg"]["description"] == "arg"
+    assert schema["parameters"]["properties"]["other"]["type"] == "integer"
+    assert schema["parameters"]["properties"]["other"]["description"] == "int arg"
+    assert "required" in schema["parameters"]
+    assert schema["parameters"]["required"] == ["arg", "other"]
+    assert len(schema["parameters"]["properties"]) == 2
+    assert "additionalProperties" in schema["parameters"]
+    assert schema["parameters"]["additionalProperties"] is False
+
+
 def test_func_tool_schema_generation_only_default_arg() -> None:
     def my_function(arg: str = "default") -> MyResult:
         return MyResult(result="test")
@@ -107,7 +139,78 @@ def test_func_tool_schema_generation_only_default_arg() -> None:
     assert len(schema["parameters"]["properties"]) == 1
     assert schema["parameters"]["properties"]["arg"]["type"] == "string"
     assert schema["parameters"]["properties"]["arg"]["description"] == "arg"
-    assert "required" not in schema["parameters"]
+    assert "required" in schema["parameters"]
+    assert schema["parameters"]["required"] == []
+
+
+def test_func_tool_schema_generation_only_default_arg_strict() -> None:
+    def my_function(arg: str = "default") -> MyResult:
+        return MyResult(result="test")
+
+    with pytest.raises(ValueError, match="Strict mode is enabled"):
+        tool = FunctionTool(my_function, description="Function tool.", strict=True)
+        _ = tool.schema
+
+
+def test_func_tool_with_partial_positional_arguments_schema_generation() -> None:
+    """Test correct schema generation for a partial function with positional arguments."""
+
+    def get_weather(country: str, city: str) -> str:
+        return f"The temperature in {city}, {country} is 75°"
+
+    partial_function = partial(get_weather, "Germany")
+    tool = FunctionTool(partial_function, description="Partial function tool.")
+    schema = tool.schema
+
+    assert schema["name"] == "get_weather"
+    assert "description" in schema
+    assert schema["description"] == "Partial function tool."
+    assert "parameters" in schema
+    assert schema["parameters"]["type"] == "object"
+    assert schema["parameters"]["properties"].keys() == {"city"}
+    assert schema["parameters"]["properties"]["city"]["type"] == "string"
+    assert schema["parameters"]["properties"]["city"]["description"] == "city"
+    assert "required" in schema["parameters"]
+    assert schema["parameters"]["required"] == ["city"]
+    assert "country" not in schema["parameters"]["properties"]  # check country not in schema params
+    assert len(schema["parameters"]["properties"]) == 1
+
+
+def test_func_call_tool_with_kwargs_schema_generation() -> None:
+    """Test correct schema generation for a partial function with kwargs."""
+
+    def get_weather(country: str, city: str) -> str:
+        return f"The temperature in {city}, {country} is 75°"
+
+    partial_function = partial(get_weather, country="Germany")
+    tool = FunctionTool(partial_function, description="Partial function tool.")
+    schema = tool.schema
+
+    assert schema["name"] == "get_weather"
+    assert "description" in schema
+    assert schema["description"] == "Partial function tool."
+    assert "parameters" in schema
+    assert schema["parameters"]["type"] == "object"
+    assert schema["parameters"]["properties"].keys() == {"country", "city"}
+    assert schema["parameters"]["properties"]["city"]["type"] == "string"
+    assert schema["parameters"]["properties"]["country"]["type"] == "string"
+    assert "required" in schema["parameters"]
+    assert schema["parameters"]["required"] == ["city"]  # only city is required
+    assert len(schema["parameters"]["properties"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_func_call_tool_with_kwargs_and_args() -> None:
+    """Test run partial function with kwargs and args."""
+
+    def get_weather(country: str, city: str, unit: str = "Celsius") -> str:
+        return f"The temperature in {city}, {country} is 75° {unit}"
+
+    partial_function = partial(get_weather, "Germany", unit="Fahrenheit")
+    tool = FunctionTool(partial_function, description="Partial function tool.")
+    result = await tool.run_json({"city": "Berlin"}, CancellationToken())
+    assert isinstance(result, str)
+    assert result == "The temperature in Berlin, Germany is 75° Fahrenheit"
 
 
 @pytest.mark.asyncio
@@ -142,7 +245,7 @@ def test_get_typed_signature() -> None:
     sig = get_typed_signature(my_function)
     assert isinstance(sig, inspect.Signature)
     assert len(sig.parameters) == 0
-    assert sig.return_annotation == str
+    assert sig.return_annotation is str
 
 
 def test_get_typed_signature_annotated() -> None:
@@ -162,7 +265,49 @@ def test_get_typed_signature_string() -> None:
     sig = get_typed_signature(my_function)
     assert isinstance(sig, inspect.Signature)
     assert len(sig.parameters) == 0
-    assert sig.return_annotation == str
+    assert sig.return_annotation is str
+
+
+def test_get_typed_signature_params() -> None:
+    def my_function(arg: str) -> None:
+        return None
+
+    sig = get_typed_signature(my_function)
+    assert isinstance(sig, inspect.Signature)
+    assert sig.return_annotation is type(None)
+    assert len(sig.parameters) == 1
+    assert sig.parameters["arg"].annotation is str
+
+
+def test_get_typed_signature_two_params() -> None:
+    def my_function(arg: str, arg2: int) -> None:
+        return None
+
+    sig = get_typed_signature(my_function)
+    assert isinstance(sig, inspect.Signature)
+    assert len(sig.parameters) == 2
+    assert sig.parameters["arg"].annotation is str
+    assert sig.parameters["arg2"].annotation is int
+
+
+def test_get_typed_signature_param_str() -> None:
+    def my_function(arg: "str") -> None:
+        return None
+
+    sig = get_typed_signature(my_function)
+    assert isinstance(sig, inspect.Signature)
+    assert len(sig.parameters) == 1
+    assert sig.parameters["arg"].annotation is str
+
+
+def test_get_typed_signature_param_annotated() -> None:
+    def my_function(arg: Annotated[str, "An arg"]) -> None:
+        return None
+
+    sig = get_typed_signature(my_function)
+    assert isinstance(sig, inspect.Signature)
+    assert len(sig.parameters) == 1
+    assert sig.parameters["arg"].annotation == Annotated[str, "An arg"]
 
 
 def test_func_tool() -> None:
@@ -187,11 +332,11 @@ def test_func_tool_annotated_arg() -> None:
     assert issubclass(tool.args_type(), BaseModel)
     assert issubclass(tool.return_type(), str)
     assert tool.args_type().model_fields["my_arg"].description == "test description"
-    assert tool.args_type().model_fields["my_arg"].annotation == str
+    assert tool.args_type().model_fields["my_arg"].annotation is str
     assert tool.args_type().model_fields["my_arg"].is_required() is True
     assert tool.args_type().model_fields["my_arg"].default is PydanticUndefined
     assert len(tool.args_type().model_fields) == 1
-    assert tool.return_type() == str
+    assert tool.return_type() is str
     assert tool.state_type() is None
 
 
@@ -203,7 +348,7 @@ def test_func_tool_return_annotated() -> None:
     assert tool.name == "my_function"
     assert tool.description == "Function tool."
     assert issubclass(tool.args_type(), BaseModel)
-    assert tool.return_type() == str
+    assert tool.return_type() is str
     assert tool.state_type() is None
 
 
@@ -216,7 +361,7 @@ def test_func_tool_no_args() -> None:
     assert tool.description == "Function tool."
     assert issubclass(tool.args_type(), BaseModel)
     assert len(tool.args_type().model_fields) == 0
-    assert tool.return_type() == str
+    assert tool.return_type() is str
     assert tool.state_type() is None
 
 
@@ -228,7 +373,7 @@ def test_func_tool_return_none() -> None:
     assert tool.name == "my_function"
     assert tool.description == "Function tool."
     assert issubclass(tool.args_type(), BaseModel)
-    assert tool.return_type() is None
+    assert tool.return_type() is type(None)
     assert tool.state_type() is None
 
 
@@ -323,29 +468,6 @@ async def test_func_int_res() -> None:
     assert tool.return_value_as_string(result) == "5"
 
 
-def test_convert_tools_accepts_both_func_tool_and_schema() -> None:
-    def my_function(arg: str, other: Annotated[int, "int arg"], nonrequired: int = 5) -> MyResult:
-        return MyResult(result="test")
-
-    tool = FunctionTool(my_function, description="Function tool.")
-    schema = tool.schema
-
-    converted_tool_schema = convert_tools([tool, schema])
-
-    assert len(converted_tool_schema) == 2
-    assert converted_tool_schema[0] == converted_tool_schema[1]
-
-
-def test_convert_tools_accepts_both_tool_and_schema() -> None:
-    tool = MyTool()
-    schema = tool.schema
-
-    converted_tool_schema = convert_tools([tool, schema])
-
-    assert len(converted_tool_schema) == 2
-    assert converted_tool_schema[0] == converted_tool_schema[1]
-
-
 @pytest.mark.asyncio
 async def test_func_tool_return_list() -> None:
     def my_function() -> List[int]:
@@ -406,3 +528,64 @@ def test_nested_tool_properties() -> None:
     assert tool.args_type() == MyNestedArgs
     assert tool.return_type() == MyResult
     assert tool.state_type() is None
+
+
+# --- Define a sample Pydantic model and tool function ---
+
+
+class AddInput(BaseModel):
+    x: int
+    y: int
+
+
+def add_tool(input: AddInput) -> int:
+    return input.x + input.y
+
+
+@pytest.mark.asyncio
+async def test_func_tool_with_pydantic_model_conversion_success() -> None:
+    tool = FunctionTool(add_tool, description="Tool to add two numbers.")
+    test_input = {"input": {"x": 2, "y": 3}}
+    result = await tool.run_json(test_input, CancellationToken())
+
+    assert result == 5
+    assert tool.return_value_as_string(result) == "5"
+
+
+@pytest.mark.asyncio
+async def test_func_tool_with_pydantic_model_conversion_failure() -> None:
+    tool = FunctionTool(add_tool, description="Tool to add two numbers.")
+    test_input = {"input": {"x": 2}}
+
+    with pytest.raises(ValidationError, match="Field required"):
+        await tool.run_json(test_input, CancellationToken())
+
+
+# --- Additional test using a dataclass ---
+@dataclass
+class MultiplyInput:
+    a: int
+    b: int
+
+
+def multiply_tool(input: MultiplyInput) -> int:
+    return input.a * input.b
+
+
+@pytest.mark.asyncio
+async def test_func_tool_with_dataclass_conversion_success() -> None:
+    tool = FunctionTool(multiply_tool, description="Tool to multiply two numbers.")
+    test_input = {"input": {"a": 4, "b": 5}}
+    result = await tool.run_json(test_input, CancellationToken())
+    assert result == 20
+    assert tool.return_value_as_string(result) == "20"
+
+
+@pytest.mark.asyncio
+async def test_func_tool_with_dataclass_conversion_failure() -> None:
+    tool = FunctionTool(multiply_tool, description="Tool to multiply two numbers.")
+    # Missing field 'b'
+    test_input = {"input": {"a": 4}}
+
+    with pytest.raises(ValidationError, match="Field required"):
+        await tool.run_json(test_input, CancellationToken())

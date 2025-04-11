@@ -2,14 +2,17 @@
 // Program.cs
 
 using System.Text.Json;
-using Microsoft.AutoGen.Abstractions;
 using Microsoft.AutoGen.Agents;
+using Microsoft.AutoGen.Contracts;
+using Microsoft.AutoGen.Core;
 
 // send a message to the agent
-var app = await AgentsApp.PublishMessageAsync("HelloAgents", new NewMessageReceived
+var local = true;
+if (Environment.GetEnvironmentVariable("AGENT_HOST") != null) { local = false; }
+var app = await Microsoft.AutoGen.Core.Grpc.AgentsApp.PublishMessageAsync("HelloAgents", new NewMessageReceived
 {
     Message = "World"
-}, local: false);
+}, local: local).ConfigureAwait(false);
 
 await app.WaitForShutdownAsync();
 
@@ -17,10 +20,8 @@ namespace Hello
 {
     [TopicSubscription("HelloAgents")]
     public class HelloAgent(
-        IAgentRuntime context,
         IHostApplicationLifetime hostApplicationLifetime,
-        [FromKeyedServices("EventTypes")] EventTypes typeRegistry) : AgentBase(
-            context,
+        [FromKeyedServices("AgentsMetadata")] AgentsMetadata typeRegistry) : Agent(
             typeRegistry),
             IHandleConsole,
             IHandle<NewMessageReceived>,
@@ -28,7 +29,7 @@ namespace Hello
             IHandle<Shutdown>
     {
         private AgentState? State { get; set; }
-        public async Task Handle(NewMessageReceived item)
+        public async Task Handle(NewMessageReceived item, CancellationToken cancellationToken = default)
         {
             var response = await SayHello(item.Message).ConfigureAwait(false);
             var evt = new Output
@@ -56,7 +57,7 @@ namespace Hello
             await PublishMessageAsync(new Shutdown { Message = this.AgentId.Key }).ConfigureAwait(false);
 
         }
-        public async Task Handle(ConversationClosed item)
+        public async Task Handle(ConversationClosed item, CancellationToken cancellationToken = default)
         {
             State = await ReadAsync<AgentState>(this.AgentId).ConfigureAwait(false);
             var state = JsonSerializer.Deserialize<Dictionary<string, string>>(State.TextData) ?? new Dictionary<string, string> { { "data", "No state data found" } };
@@ -73,7 +74,7 @@ namespace Hello
                 TextData = JsonSerializer.Serialize(state)
             }).ConfigureAwait(false);
         }
-        public async Task Handle(Shutdown item)
+        public async Task Handle(Shutdown item, CancellationToken cancellationToken = default)
         {
             string? workflow = null;
             // make sure the workflow is finished

@@ -5,9 +5,14 @@ from typing import List
 
 import pytest
 from autogen_agentchat.teams._group_chat._sequential_routed_agent import SequentialRoutedAgent
-from autogen_core.application import SingleThreadedAgentRuntime
-from autogen_core.base import AgentId, MessageContext
-from autogen_core.components import DefaultTopicId, default_subscription, message_handler
+from autogen_core import (
+    AgentId,
+    DefaultTopicId,
+    MessageContext,
+    SingleThreadedAgentRuntime,
+    default_subscription,
+    message_handler,
+)
 
 
 @dataclass
@@ -18,7 +23,7 @@ class Message:
 @default_subscription
 class _TestAgent(SequentialRoutedAgent):
     def __init__(self, description: str) -> None:
-        super().__init__(description=description)
+        super().__init__(description=description, sequential_message_types=[Message])
         self.messages: List[Message] = []
 
     @message_handler

@@ -1,8 +1,7 @@
 import asyncio
-from typing import Any
+from typing import Any, Sequence
 
-from autogen_core.base import MessageContext
-from autogen_core.components import RoutedAgent
+from autogen_core import MessageContext, RoutedAgent
 
 
 class FIFOLock:
@@ -36,16 +35,38 @@ class FIFOLock:
 
 
 class SequentialRoutedAgent(RoutedAgent):
-    """A subclass of :class:`autogen_core.components.RoutedAgent` that ensures
-    messages are handled sequentially in the order they arrive."""
+    """A subclass of :class:`autogen_core.RoutedAgent` that ensures
+    that messages of certain types are processed sequentially
+    using a FIFO lock.
 
-    def __init__(self, description: str) -> None:
+    This is useful for agents that need to maintain a strict order of
+    processing messages, such as in a group chat scenario.
+
+
+
+    Args:
+
+        description (str): The description of the agent.
+        sequential_message_types (Sequence[Type[Any]]): A sequence of message types that should be
+            processed sequentially. If a message of one of these types is received,
+            the agent will acquire a FIFO lock to ensure that it is processed
+            before any later messages that are also one of these types.
+    """
+
+    def __init__(self, description: str, sequential_message_types: Sequence[type[Any]]) -> None:
         super().__init__(description=description)
         self._fifo_lock = FIFOLock()
+        self._sequential_message_types = sequential_message_types
 
-    async def on_message(self, message: Any, ctx: MessageContext) -> Any | None:
-        await self._fifo_lock.acquire()
-        try:
-            return await super().on_message(message, ctx)
-        finally:
-            self._fifo_lock.release()
+    async def on_message_impl(self, message: Any, ctx: MessageContext) -> Any | None:
+        if any(isinstance(message, sequential_type) for sequential_type in self._sequential_message_types):
+            # Acquire the FIFO lock to ensure that this message is processed
+            # in the order it was received.
+            await self._fifo_lock.acquire()
+            try:
+                return await super().on_message_impl(message, ctx)
+            finally:
+                # Release the FIFO lock to allow the next message to be processed.
+                self._fifo_lock.release()
+        # If the message is not of a sequential type, process it normally.
+        return await super().on_message_impl(message, ctx)

@@ -1,105 +1,38 @@
+# from dataclasses import Field
 from datetime import datetime
-from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
-from pydantic import BaseModel
-from autogen_agentchat.base._task import TaskResult
-
-
-class ModelTypes(str, Enum):
-    OPENAI = "OpenAIChatCompletionClient"
-
-
-class ToolTypes(str, Enum):
-    PYTHON_FUNCTION = "PythonFunction"
-
-
-class AgentTypes(str, Enum):
-    ASSISTANT = "AssistantAgent"
-    USERPROXY = "UserProxyAgent"
-
-
-class TeamTypes(str, Enum):
-    ROUND_ROBIN = "RoundRobinGroupChat"
-    SELECTOR = "SelectorGroupChat"
-
-
-class TerminationTypes(str, Enum):
-    MAX_MESSAGES = "MaxMessageTermination"
-    STOP_MESSAGE = "StopMessageTermination"
-    TEXT_MENTION = "TextMentionTermination"
-
-
-class ComponentType(str, Enum):
-    TEAM = "team"
-    AGENT = "agent"
-    MODEL = "model"
-    TOOL = "tool"
-    TERMINATION = "termination"
-
-
-class BaseConfig(BaseModel):
-    model_config = {
-        "protected_namespaces": ()
-    }
-    version: str = "1.0.0"
-    component_type: ComponentType
+from autogen_agentchat.base import TaskResult
+from autogen_agentchat.messages import ChatMessage, TextMessage
+from autogen_core import ComponentModel
+from autogen_core.models import UserMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 
 class MessageConfig(BaseModel):
     source: str
-    content: str
+    content: str | ChatMessage | Sequence[ChatMessage] | None
     message_type: Optional[str] = "text"
-
-
-class ModelConfig(BaseConfig):
-    model: str
-    model_type: ModelTypes
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    component_type: ComponentType = ComponentType.MODEL
-
-
-class ToolConfig(BaseConfig):
-    name: str
-    description: str
-    content: str
-    tool_type: ToolTypes
-    component_type: ComponentType = ComponentType.TOOL
-
-
-class AgentConfig(BaseConfig):
-    name: str
-    agent_type: AgentTypes
-    system_message: Optional[str] = None
-    model_client: Optional[ModelConfig] = None
-    tools: Optional[List[ToolConfig]] = None
-    description: Optional[str] = None
-    component_type: ComponentType = ComponentType.AGENT
-
-
-class TerminationConfig(BaseConfig):
-    termination_type: TerminationTypes
-    max_messages: Optional[int] = None
-    text: Optional[str] = None
-    component_type: ComponentType = ComponentType.TERMINATION
-
-
-class TeamConfig(BaseConfig):
-    name: str
-    participants: List[AgentConfig]
-    team_type: TeamTypes
-    model_client: Optional[ModelConfig] = None
-    selector_prompt: Optional[str] = None
-    termination_condition: Optional[TerminationConfig] = None
-    component_type: ComponentType = ComponentType.TEAM
 
 
 class TeamResult(BaseModel):
     task_result: TaskResult
     usage: str
     duration: float
+
+
+class LLMCallEventMessage(TextMessage):
+    source: str = "llm_call_event"
+
+    def to_text(self) -> str:
+        return self.content
+
+    def to_model_text(self) -> str:
+        return self.content
+
+    def to_model_message(self) -> UserMessage:
+        raise NotImplementedError("This message type is not supported.")
 
 
 class MessageMeta(BaseModel):
@@ -110,6 +43,68 @@ class MessageMeta(BaseModel):
     time: Optional[datetime] = None
     log: Optional[List[dict]] = None
     usage: Optional[List[dict]] = None
+
+
+class GalleryMetadata(BaseModel):
+    author: str
+    # created_at: datetime = Field(default_factory=datetime.now)
+    # updated_at: datetime = Field(default_factory=datetime.now)
+    version: str
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    license: Optional[str] = None
+    homepage: Optional[str] = None
+    category: Optional[str] = None
+    last_synced: Optional[datetime] = None
+
+    model_config = ConfigDict(
+        json_encoders={
+            datetime: lambda v: v.isoformat(),
+        }
+    )
+
+
+class GalleryComponents(BaseModel):
+    agents: List[ComponentModel]
+    models: List[ComponentModel]
+    tools: List[ComponentModel]
+    terminations: List[ComponentModel]
+    teams: List[ComponentModel]
+
+
+class GalleryConfig(BaseModel):
+    id: str
+    name: str
+    url: Optional[str] = None
+    metadata: GalleryMetadata
+    components: GalleryComponents
+
+    model_config = ConfigDict(
+        json_encoders={datetime: lambda v: v.isoformat(), SecretStr: lambda v: v.get_secret_value()}
+    )
+
+
+class EnvironmentVariable(BaseModel):
+    name: str
+    value: str
+    type: Literal["string", "number", "boolean", "secret"] = "string"
+    description: Optional[str] = None
+    required: bool = False
+
+
+class UISettings(BaseModel):
+    show_llm_call_events: bool = False
+    expanded_messages_by_default: bool = True
+    show_agent_flow_by_default: bool = True
+
+
+class SettingsConfig(BaseModel):
+    environment: List[EnvironmentVariable] = []
+    default_model_client: Optional[ComponentModel] = OpenAIChatCompletionClient(
+        model="gpt-4o-mini", api_key="your-api-key"
+    ).dump_component()
+    ui: UISettings = UISettings()
+
 
 # web request/response data models
 
@@ -124,14 +119,3 @@ class SocketMessage(BaseModel):
     connection_id: str
     data: Dict[str, Any]
     type: str
-
-
-ComponentConfig = Union[
-    TeamConfig,
-    AgentConfig,
-    ModelConfig,
-    ToolConfig,
-    TerminationConfig
-]
-
-ComponentConfigInput = Union[str, Path, dict, ComponentConfig]
